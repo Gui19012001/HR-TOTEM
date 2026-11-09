@@ -137,7 +137,7 @@ def render_authentication():
         with st.form("rh-signup"):
             signup_name = st.text_input("Nome completo", max_chars=100)
             signup_email = st.text_input("E-mail", autocomplete="email").strip().lower()
-            signup_password = st.text_input("Crie uma senha", type="password", min_chars=8, max_chars=128)
+            signup_password = st.text_input("Crie uma senha", type="password", max_chars=128)
             submitted_signup = st.form_submit_button("Criar meu acesso", type="primary", use_container_width=True)
         if submitted_signup:
             if not signup_name.strip() or "@" not in signup_email or len(signup_password) < 8:
