@@ -61,6 +61,7 @@ def secrets_value(name: str, default: str = "") -> str:
 SUPABASE_URL = secrets_value("SUPABASE_URL").rstrip("/")
 SUPABASE_KEY = secrets_value("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_ANON_KEY = secrets_value("SUPABASE_ANON_KEY")
+APP_URL = secrets_value("APP_URL", "https://hriberototem.streamlit.app").rstrip("/")
 
 class Store:
     def __init__(self, url: str, key: str):
@@ -144,7 +145,8 @@ def render_authentication():
                 st.error("Informe nome, e-mail válido e senha com pelo menos 8 caracteres.")
             else:
                 try:
-                    data = auth_request("signup", {"email": signup_email, "password": signup_password, "data": {"display_name": signup_name.strip()}})
+                    redirect = requests.utils.quote(APP_URL, safe="")
+                    data = auth_request(f"signup?redirect_to={redirect}", {"email": signup_email, "password": signup_password, "data": {"display_name": signup_name.strip()}})
                     new_user = data.get("user") or {}
                     if new_user.get("id"):
                         store.upsert("rh_staff_profiles", {
@@ -164,6 +166,17 @@ def render_authentication():
                         st.success("Cadastro recebido. Confirme o e-mail; depois o administrador autorizará seu acesso.")
                 except Exception as exc:
                     st.error(f"Não foi possível criar o acesso: {exc}")
+        resend_email = st.text_input("E-mail para reenviar a confirmação", key="resend_email", autocomplete="email")
+        if st.button("Reenviar e-mail de confirmação", key="resend-confirmation"):
+            if "@" not in resend_email:
+                st.error("Informe o e-mail usado no cadastro.")
+            else:
+                try:
+                    redirect = requests.utils.quote(APP_URL, safe="")
+                    auth_request(f"resend?redirect_to={redirect}", {"type": "signup", "email": resend_email.strip().lower()})
+                    st.success("Se houver um cadastro pendente para esse e-mail, a confirmação será enviada novamente.")
+                except Exception as exc:
+                    st.error(f"Não foi possível reenviar a confirmação: {exc}")
     st.stop()
 
 if not st.session_state.get("rh_access_token"):
@@ -176,7 +189,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("Configure as chaves privadas do Supabase nos Secrets do Streamlit Cloud.")
     st.stop()
 try:
-    found_profile = store.rows("rh_staff_profiles", f"select=email,display_name,photo_url,is_available&email=eq.{requests.utils.quote(email)}")
+    found_profile = store.rows("rh_staff_profiles", f"select=email,display_name,photo_url,is_available,approval_status,role&email=eq.{requests.utils.quote(email)}")
     if found_profile:
         profile = found_profile[0]
     else:
