@@ -60,7 +60,7 @@ def secrets_value(name: str, default: str = "") -> str:
 
 SUPABASE_URL = secrets_value("SUPABASE_URL").rstrip("/")
 SUPABASE_KEY = secrets_value("SUPABASE_SERVICE_ROLE_KEY")
-ALLOWED_EMAILS = {item.strip().lower() for item in secrets_value("RH_ALLOWED_EMAILS").split(",") if item.strip()}
+SUPABASE_ANON_KEY = secrets_value("SUPABASE_ANON_KEY")
 
 class Store:
     def __init__(self, url: str, key: str):
@@ -96,31 +96,91 @@ class Store:
 
 store = Store(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
-# ---------- Microsoft 365 sign-in ----------
-if not st.user.is_logged_in:
-    st.markdown('<div class="eyebrow">IBERO CONECTA · ACESSO CORPORATIVO</div><div class="hero-title">Central de atendimento</div><p class="subtle">Entre com sua conta Microsoft 365 do RH.</p>', unsafe_allow_html=True)
-    st.button("Entrar com Microsoft 365", type="primary", on_click=st.login, args=["microsoft"])
-    st.caption("O acesso é individual. O nome e o e-mail vêm da conta corporativa; a foto pode ser adicionada no perfil.")
-    st.stop()
-
-claims = st.user
-email = str(claims.get("email") or claims.get("preferred_username") or "").strip().lower()
-identity_name = str(claims.get("name") or email.split("@")[0] or "Atendente RH")
-identity_id = str(claims.get("oid") or claims.get("sub") or email)
-if not email or (ALLOWED_EMAILS and email not in ALLOWED_EMAILS):
-    st.error("Esta conta Microsoft não está autorizada para o painel do RH.")
-    st.button("Sair da conta Microsoft", on_click=st.logout)
-    st.stop()
-if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("Configure SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY nos Secrets do Streamlit Cloud.")
+# ---------- Individual account in Supabase Auth ----------
+if not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_ANON_KEY:
+    st.error("Configure SUPABASE_URL, SUPABASE_ANON_KEY e SUPABASE_SERVICE_ROLE_KEY nos Secrets do Streamlit Cloud.")
     st.stop()
 store = Store(SUPABASE_URL, SUPABASE_KEY)
+
+def auth_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    response = requests.post(
+        f"{SUPABASE_URL}/auth/v1/{path}",
+        headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+        json=payload,
+        timeout=15,
+    )
+    data = response.json() if response.content else {}
+    if not response.ok:
+        message = data.get("msg") or data.get("message") or data.get("error_description") or "Falha na autenticação."
+        raise ValueError(message)
+    return data
+
+def render_authentication():
+    st.markdown('<div class="eyebrow">IBERO CONECTA · ACESSO RH</div><div class="hero-title">Central de atendimento</div><p class="subtle">Entre ou crie seu acesso individual usando um e-mail autorizado pela Ibero.</p>', unsafe_allow_html=True)
+    sign_in, sign_up = st.tabs(["Entrar", "Cadastrar atendente"])
+    with sign_in:
+        with st.form("rh-login"):
+            login_email = st.text_input("E-mail", autocomplete="email").strip().lower()
+            login_password = st.text_input("Senha", type="password", autocomplete="current-password")
+            submitted = st.form_submit_button("Entrar no painel", type="primary", use_container_width=True)
+        if submitted:
+            try:
+                data = auth_request("token?grant_type=password", {"email": login_email, "password": login_password})
+                account_email = (data.get("user") or {}).get("email", login_email).lower()
+                st.session_state.rh_access_token = data["access_token"]
+                st.session_state.rh_email = account_email
+                st.session_state.rh_identity = (data.get("user") or {}).get("id", account_email)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Não foi possível entrar: {exc}")
+    with sign_up:
+        with st.form("rh-signup"):
+            signup_name = st.text_input("Nome completo", max_chars=100)
+            signup_email = st.text_input("E-mail", autocomplete="email").strip().lower()
+            signup_password = st.text_input("Crie uma senha", type="password", min_chars=8, max_chars=128)
+            submitted_signup = st.form_submit_button("Criar meu acesso", type="primary", use_container_width=True)
+        if submitted_signup:
+            if not signup_name.strip() or "@" not in signup_email or len(signup_password) < 8:
+                st.error("Informe nome, e-mail válido e senha com pelo menos 8 caracteres.")
+            else:
+                try:
+                    data = auth_request("signup", {"email": signup_email, "password": signup_password, "data": {"display_name": signup_name.strip()}})
+                    new_user = data.get("user") or {}
+                    if new_user.get("id"):
+                        store.upsert("rh_staff_profiles", {
+                            "email": signup_email,
+                            "auth_user_id": new_user["id"],
+                            "display_name": signup_name.strip(),
+                            "approval_status": "pending",
+                            "role": "attendant",
+                            "is_available": False,
+                        }, "email")
+                    if data.get("access_token"):
+                        st.session_state.rh_access_token = data["access_token"]
+                        st.session_state.rh_email = (new_user.get("email") or signup_email).lower()
+                        st.session_state.rh_identity = new_user.get("id", signup_email)
+                        st.rerun()
+                    else:
+                        st.success("Cadastro recebido. Confirme o e-mail; depois o administrador autorizará seu acesso.")
+                except Exception as exc:
+                    st.error(f"Não foi possível criar o acesso: {exc}")
+    st.stop()
+
+if not st.session_state.get("rh_access_token"):
+    render_authentication()
+
+email = st.session_state.rh_email
+identity_name = st.session_state.pop("rh_initial_name", email.split("@")[0])
+identity_id = st.session_state.rh_identity
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("Configure as chaves privadas do Supabase nos Secrets do Streamlit Cloud.")
+    st.stop()
 try:
     found_profile = store.rows("rh_staff_profiles", f"select=email,display_name,photo_url,is_available&email=eq.{requests.utils.quote(email)}")
     if found_profile:
         profile = found_profile[0]
     else:
-        profile = store.upsert("rh_staff_profiles", {"email": email, "microsoft_oid": identity_id, "display_name": identity_name, "is_available": False}, "email")[0]
+        profile = store.upsert("rh_staff_profiles", {"email": email, "auth_user_id": identity_id, "display_name": identity_name, "approval_status": "pending", "role": "attendant", "is_available": False}, "email")[0]
 except Exception as exc:
     st.error("Não consegui carregar o perfil do RH. Confira a tabela rh_staff_profiles no Supabase.")
     st.caption(str(exc))
@@ -129,7 +189,19 @@ st.session_state.profile = profile
 st.session_state.rh_name = profile.get("display_name") or identity_name
 st.session_state.profile_url = profile.get("photo_url") or ""
 st.session_state.available = bool(profile.get("is_available", False))
-st_autorefresh(interval=7000, key="rh_queue_refresh")
+if profile.get("approval_status") != "approved":
+    if profile.get("approval_status") == "rejected":
+        st.markdown('<div class="eyebrow">ACESSO NÃO LIBERADO</div><div class="hero-title">Cadastro não aprovado</div>', unsafe_allow_html=True)
+        st.info("O administrador não liberou este cadastro. Procure o responsável pelo IBERO ATENDE.")
+    else:
+        st.markdown('<div class="eyebrow">CADASTRO RECEBIDO</div><div class="hero-title">Acesso aguardando liberação</div>', unsafe_allow_html=True)
+        st.info("Seu cadastro foi criado. O administrador do IBERO ATENDE precisa aprovar o acesso antes de você receber atendimentos.")
+    st.caption(f"Conta: {email} · Nome: {profile.get('display_name', identity_name)}")
+    if st.button("Sair"):
+        for key in ("rh_access_token", "rh_email", "rh_identity", "rh_name", "profile_url", "profile"):
+            st.session_state.pop(key, None)
+        st.rerun()
+    st.stop()
 st_autorefresh(interval=7000, key="rh_queue_refresh")
 
 # ---------- Header / profile ----------
@@ -150,6 +222,29 @@ with right:
 
 st.markdown('<div class="eyebrow">VISÃO OPERACIONAL</div><div class="hero-title">Olá, equipe RH<span style="color:#5ce1e6">.</span></div><div class="subtle">Acompanhe a fila e fique disponível para receber o próximo contato.</div>', unsafe_allow_html=True)
 st.write("")
+
+if profile.get("role") == "admin":
+    with st.expander("Administração de acessos", expanded=True):
+        st.markdown("#### Cadastros aguardando aprovação")
+        try:
+            waiting = store.rows("rh_staff_profiles", "select=email,display_name,created_at&approval_status=eq.pending&order=created_at.asc")
+            if not waiting:
+                st.caption("Não há cadastros pendentes.")
+            for person in waiting:
+                pcol, approve_col, reject_col = st.columns([6, 1, 1], vertical_alignment="center")
+                with pcol:
+                    st.write(f"**{person.get('display_name','Atendente')}** · {person.get('email','')}")
+                    st.caption(f"Solicitado em {str(person.get('created_at',''))[:16].replace('T',' ')}")
+                with approve_col:
+                    if st.button("Aprovar", key=f"approve-{person['email']}"):
+                        store.update("rh_staff_profiles", f"email=eq.{requests.utils.quote(person['email'])}", {"approval_status":"approved"})
+                        st.rerun()
+                with reject_col:
+                    if st.button("Rejeitar", key=f"reject-{person['email']}"):
+                        store.update("rh_staff_profiles", f"email=eq.{requests.utils.quote(person['email'])}", {"approval_status":"rejected", "is_available":False})
+                        st.rerun()
+        except Exception as exc:
+            st.error(f"Não foi possível carregar os cadastros: {exc}")
 
 # Profile controls and status
 control1, control2, control3 = st.columns([2, 2, 6], vertical_alignment="center")
@@ -261,5 +356,7 @@ st.markdown("<hr>",unsafe_allow_html=True)
 foot1,foot2=st.columns([8,2])
 with foot1: st.caption("IBERO ATENDE · Atendimentos privados · Não grave ou compartilhe dados do colaborador fora do fluxo autorizado.")
 with foot2:
-    if st.button("Sair do painel",use_container_width=True, on_click=st.logout):
-        pass
+    if st.button("Sair do painel",use_container_width=True):
+        for key in ("rh_access_token", "rh_email", "rh_identity", "rh_name", "profile_url", "profile", "current_room"):
+            st.session_state.pop(key, None)
+        st.rerun()
