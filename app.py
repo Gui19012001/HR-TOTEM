@@ -60,7 +60,7 @@ def secrets_value(name: str, default: str = "") -> str:
 
 SUPABASE_URL = secrets_value("SUPABASE_URL").rstrip("/")
 SUPABASE_KEY = secrets_value("SUPABASE_SERVICE_ROLE_KEY")
-ACCESS_CODE = secrets_value("RH_ACCESS_CODE")
+ALLOWED_EMAILS = {item.strip().lower() for item in secrets_value("RH_ALLOWED_EMAILS").split(",") if item.strip()}
 
 class Store:
     def __init__(self, url: str, key: str):
@@ -81,34 +81,55 @@ class Store:
         r.raise_for_status()
         return r.json()
 
-    def upload_profile(self, name: str, content: bytes, mime: str) -> str:
-        path = f"rh/{name.strip().lower().replace(' ', '-')}-{int(datetime.now().timestamp())}"
+    def upsert(self, table: str, payload: dict[str, Any], conflict: str):
+        h = {**self.headers, "Prefer": "resolution=merge-duplicates,return=representation"}
+        r = requests.post(f"{self.url}/rest/v1/{table}?on_conflict={conflict}", headers=h, json=payload, timeout=12)
+        r.raise_for_status()
+        return r.json()
+
+    def upload_profile(self, user_key: str, content: bytes, mime: str) -> str:
+        ext = "png" if "png" in mime else "jpg"
+        path = f"rh/{user_key}.{ext}"
         r = requests.post(f"{self.url}/storage/v1/object/rh-profiles/{path}", headers={**self.headers, "Content-Type": mime, "x-upsert": "true"}, data=content, timeout=20)
         r.raise_for_status()
-        return f"{self.url}/storage/v1/object/public/rh-profiles/{path}"
+        return f"{self.url}/storage/v1/object/public/rh-profiles/{path}?v={int(datetime.now().timestamp())}"
 
 store = Store(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
-# ---------- Access gate ----------
-def access_gate():
-    if not ACCESS_CODE:
-        st.error("Configure RH_ACCESS_CODE nos Secrets do Streamlit Cloud antes de publicar este painel.")
-        st.code('RH_ACCESS_CODE = "defina-um-codigo-forte"')
-        st.stop()
-    if not st.session_state.get("rh_authenticated"):
-        st.markdown('<div class="eyebrow">IBERO CONECTA · ÁREA RESTRITA</div><div class="hero-title">Central de atendimento</div><p class="subtle">Entre para acompanhar os chamados privados do totem.</p>', unsafe_allow_html=True)
-        with st.container(border=True):
-            st.markdown("### Acesso do RH")
-            code = st.text_input("Código de acesso", type="password", key="login_code")
-            if st.button("Acessar painel", type="primary", use_container_width=True):
-                if code and code == ACCESS_CODE:
-                    st.session_state.rh_authenticated = True
-                    st.rerun()
-                else:
-                    st.error("Código inválido.")
-        st.stop()
+# ---------- Microsoft 365 sign-in ----------
+if not st.user.is_logged_in:
+    st.markdown('<div class="eyebrow">IBERO CONECTA · ACESSO CORPORATIVO</div><div class="hero-title">Central de atendimento</div><p class="subtle">Entre com sua conta Microsoft 365 do RH.</p>', unsafe_allow_html=True)
+    st.button("Entrar com Microsoft 365", type="primary", on_click=st.login, args=["microsoft"])
+    st.caption("O acesso é individual. O nome e o e-mail vêm da conta corporativa; a foto pode ser adicionada no perfil.")
+    st.stop()
 
-access_gate()
+claims = st.user
+email = str(claims.get("email") or claims.get("preferred_username") or "").strip().lower()
+identity_name = str(claims.get("name") or email.split("@")[0] or "Atendente RH")
+identity_id = str(claims.get("oid") or claims.get("sub") or email)
+if not email or (ALLOWED_EMAILS and email not in ALLOWED_EMAILS):
+    st.error("Esta conta Microsoft não está autorizada para o painel do RH.")
+    st.button("Sair da conta Microsoft", on_click=st.logout)
+    st.stop()
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("Configure SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY nos Secrets do Streamlit Cloud.")
+    st.stop()
+store = Store(SUPABASE_URL, SUPABASE_KEY)
+try:
+    found_profile = store.rows("rh_staff_profiles", f"select=email,display_name,photo_url,is_available&email=eq.{requests.utils.quote(email)}")
+    if found_profile:
+        profile = found_profile[0]
+    else:
+        profile = store.upsert("rh_staff_profiles", {"email": email, "microsoft_oid": identity_id, "display_name": identity_name, "is_available": False}, "email")[0]
+except Exception as exc:
+    st.error("Não consegui carregar o perfil do RH. Confira a tabela rh_staff_profiles no Supabase.")
+    st.caption(str(exc))
+    st.stop()
+st.session_state.profile = profile
+st.session_state.rh_name = profile.get("display_name") or identity_name
+st.session_state.profile_url = profile.get("photo_url") or ""
+st.session_state.available = bool(profile.get("is_available", False))
+st_autorefresh(interval=7000, key="rh_queue_refresh")
 st_autorefresh(interval=7000, key="rh_queue_refresh")
 
 # ---------- Header / profile ----------
@@ -125,9 +146,7 @@ with right:
         else:
             st.markdown('<div class="orb">RH</div>', unsafe_allow_html=True)
     with p2:
-        name = st.text_input("Nome de exibição", value=name, label_visibility="collapsed", key="rh_name_input", placeholder="Seu nome")
-        st.session_state.rh_name = name or "Atendimento RH"
-        st.caption("Perfil da atendente")
+        st.markdown(f'<div class="profile-name">{escape(name)}</div><div class="profile-role">{escape(email)}</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="eyebrow">VISÃO OPERACIONAL</div><div class="hero-title">Olá, equipe RH<span style="color:#5ce1e6">.</span></div><div class="subtle">Acompanhe a fila e fique disponível para receber o próximo contato.</div>', unsafe_allow_html=True)
 st.write("")
@@ -135,22 +154,37 @@ st.write("")
 # Profile controls and status
 control1, control2, control3 = st.columns([2, 2, 6], vertical_alignment="center")
 with control1:
-    if "available" not in st.session_state: st.session_state.available = False
-    st.session_state.available = st.toggle("Disponível para atender", value=st.session_state.available)
+    available = st.toggle("Disponível para atender", value=st.session_state.available, key="availability_toggle")
+    if available != st.session_state.available:
+        try:
+            store.update("rh_staff_profiles", f"email=eq.{requests.utils.quote(email)}", {"is_available": available})
+            st.session_state.available = available
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Não foi possível atualizar sua disponibilidade: {exc}")
 with control2:
     st.markdown('<span class="pill">● CONEXÃO SEGURA</span>' if store else '<span class="pill off">● MODO DEMONSTRAÇÃO</span>', unsafe_allow_html=True)
 with control3:
     with st.expander("Editar foto de perfil"):
+        edited_name = st.text_input("Nome de exibição", value=name, key="rh_name_input")
         upload = st.file_uploader("Escolha uma foto", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
-        if upload and store:
+        if st.button("Salvar nome", key="save-profile-name"):
             try:
-                st.session_state.profile_url = store.upload_profile(name or "rh", upload.getvalue(), upload.type)
+                store.update("rh_staff_profiles", f"email=eq.{requests.utils.quote(email)}", {"display_name": edited_name.strip() or identity_name})
+                st.session_state.rh_name = edited_name.strip() or identity_name
+                st.success("Nome atualizado.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Não foi possível atualizar o perfil: {exc}")
+        if upload and st.button("Salvar foto", key="save-profile-photo"):
+            try:
+                profile_url = store.upload_profile(identity_id, upload.getvalue(), upload.type)
+                store.update("rh_staff_profiles", f"email=eq.{requests.utils.quote(email)}", {"photo_url": profile_url})
+                st.session_state.profile_url = profile_url
                 st.success("Foto de perfil atualizada.")
                 st.rerun()
             except Exception as exc:
-                st.error(f"Não foi possível salvar a foto: {exc}")
-        elif upload:
-            st.info("Conecte o Supabase para salvar a foto entre sessões.")
+                st.error(f"Não foi possível salvar a foto. Confira o bucket rh-profiles: {exc}")
 
 # Load queue or demo
 DEMO = [
@@ -227,5 +261,5 @@ st.markdown("<hr>",unsafe_allow_html=True)
 foot1,foot2=st.columns([8,2])
 with foot1: st.caption("IBERO ATENDE · Atendimentos privados · Não grave ou compartilhe dados do colaborador fora do fluxo autorizado.")
 with foot2:
-    if st.button("Sair do painel",use_container_width=True):
-        st.session_state.rh_authenticated=False; st.rerun()
+    if st.button("Sair do painel",use_container_width=True, on_click=st.logout):
+        pass
