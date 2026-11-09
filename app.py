@@ -1,10 +1,12 @@
 import os
+import io
 from html import escape
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
 import streamlit as st
+from PIL import Image, ImageOps, UnidentifiedImageError
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="IBERO ATENDE · RH", page_icon="✦", layout="wide", initial_sidebar_state="collapsed")
@@ -82,6 +84,12 @@ class Store:
         r.raise_for_status()
         return r.json()
 
+    def insert(self, table: str, payload: dict[str, Any]):
+        h = {**self.headers, "Prefer": "return=representation"}
+        r = requests.post(f"{self.url}/rest/v1/{table}", headers=h, json=payload, timeout=15)
+        r.raise_for_status()
+        return r.json()
+
     def upsert(self, table: str, payload: dict[str, Any], conflict: str):
         h = {**self.headers, "Prefer": "resolution=merge-duplicates,return=representation"}
         r = requests.post(f"{self.url}/rest/v1/{table}?on_conflict={conflict}", headers=h, json=payload, timeout=12)
@@ -89,10 +97,32 @@ class Store:
         return r.json()
 
     def upload_profile(self, user_key: str, content: bytes, mime: str) -> str:
-        ext = "png" if "png" in mime else "jpg"
-        path = f"rh/{user_key}.{ext}"
-        r = requests.post(f"{self.url}/storage/v1/object/rh-profiles/{path}", headers={**self.headers, "Content-Type": mime, "x-upsert": "true"}, data=content, timeout=20)
-        r.raise_for_status()
+        if not content:
+            raise ValueError("O arquivo de imagem está vazio.")
+        try:
+            with Image.open(io.BytesIO(content)) as source:
+                image = ImageOps.exif_transpose(source).convert("RGB")
+                image.thumbnail((700, 700))
+                output = io.BytesIO()
+                image.save(output, format="JPEG", quality=86, optimize=True)
+                content = output.getvalue()
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            raise ValueError("Não reconheci essa imagem. Envie um arquivo JPG ou PNG válido.") from exc
+        path = f"rh/{user_key}.jpg"
+        r = requests.post(
+            f"{self.url}/storage/v1/object/rh-profiles/{path}",
+            headers={**self.headers, "Content-Type": "image/jpeg", "x-upsert": "true"},
+            data=content,
+            timeout=30,
+        )
+        if not r.ok:
+            try:
+                detail = r.json()
+            except ValueError:
+                detail = {"message": r.text}
+            code = detail.get("code") or detail.get("error") or detail.get("statusCode") or ""
+            message = detail.get("message") or detail.get("msg") or detail.get("error_description") or r.reason
+            raise RuntimeError(f"Storage HTTP {r.status_code} {f'({code}) ' if code else ''}{message}")
         return f"{self.url}/storage/v1/object/public/rh-profiles/{path}?v={int(datetime.now().timestamp())}"
 
 store = Store(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
@@ -102,6 +132,92 @@ if not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_ANON_KEY:
     st.error("Configure SUPABASE_URL, SUPABASE_ANON_KEY e SUPABASE_SERVICE_ROLE_KEY nos Secrets do Streamlit Cloud.")
     st.stop()
 store = Store(SUPABASE_URL, SUPABASE_KEY)
+
+# ---------- Kiosk entry: public screen, private server-side Supabase access ----------
+def render_kiosk():
+    st_autorefresh(interval=3500, key="kiosk_room_refresh")
+    st.markdown('<div class="eyebrow">IBERO CONECTA · ATENDIMENTO RH</div><div class="hero-title">Fale com o RH</div><p class="subtle">Seu chamado será encaminhado à equipe disponível. Não informe dados pessoais nesta tela.</p>', unsafe_allow_html=True)
+    try:
+        online = store.rows("rh_staff_profiles", "select=email&approval_status=eq.approved&is_available=eq.true")
+        if online:
+            st.markdown(f'<span class="pill">● RH disponível · {len(online)} profissional(is)</span>', unsafe_allow_html=True)
+        else:
+            st.markdown('<span class="pill off">● RH pausado no momento</span>', unsafe_allow_html=True)
+    except Exception as exc:
+        st.error("Não consegui consultar a disponibilidade do RH. Tente novamente em instantes.")
+        st.caption(str(exc))
+        st.stop()
+
+    room_id = st.session_state.get("kiosk_room_id")
+    if room_id:
+        try:
+            rows = store.rows("rh_rooms", f"select=id,tipo,assunto,status,atendente,created_at,expires_at&id=eq.{requests.utils.quote(str(room_id))}")
+        except Exception as exc:
+            st.error("Não consegui atualizar o chamado. Verifique a conexão e tente novamente.")
+            st.caption(str(exc))
+            st.stop()
+        if not rows:
+            st.session_state.pop("kiosk_room_id", None)
+            st.warning("Este chamado não está mais disponível. Você pode iniciar outro.")
+            st.rerun()
+        room = rows[0]
+        status = room.get("status")
+        if status == "pendente":
+            try:
+                expires_at = datetime.fromisoformat(str(room.get("expires_at", "")).replace("Z", "+00:00"))
+                if expires_at <= datetime.now(timezone.utc):
+                    store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(room_id))}", {"status":"encerrado"})
+                    st.session_state.pop("kiosk_room_id", None)
+                    st.warning("O tempo de espera terminou. Se ainda precisar, envie outro chamado.")
+                    return
+            except (TypeError, ValueError):
+                pass
+            st.markdown('<div class="glass" style="max-width:900px;margin:28px auto;text-align:center;padding:36px"><div class="eyebrow">CHAMADO ENVIADO</div><div class="hero-title" style="font-size:2rem">Aguarde um instante</div><p class="subtle">O RH foi avisado. Esta tela será atualizada automaticamente quando alguém aceitar.</p></div>', unsafe_allow_html=True)
+            if st.button("Cancelar chamado", use_container_width=True):
+                store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(room_id))}", {"status":"encerrado"})
+                st.session_state.pop("kiosk_room_id", None)
+                st.rerun()
+        elif status == "em_atendimento":
+            attendant = escape(str(room.get("atendente") or "Equipe RH"))
+            st.markdown(f'<div class="glass" style="max-width:900px;margin:28px auto;text-align:center;padding:36px"><div class="eyebrow">CHAMADO ACEITO</div><div class="hero-title" style="font-size:2rem">O RH está disponível para atender</div><p class="subtle">{attendant} aceitou sua solicitação.</p><p class="subtle">A chamada foi encaminhada. A conexão de chat e vídeo será ativada na próxima etapa.</p></div>', unsafe_allow_html=True)
+            if st.button("Concluir", type="primary", use_container_width=True):
+                store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(room_id))}", {"status":"encerrado"})
+                st.session_state.pop("kiosk_room_id", None)
+                st.rerun()
+        else:
+            st.session_state.pop("kiosk_room_id", None)
+            st.info("O chamado foi encerrado. Se ainda precisar, inicie um novo atendimento.")
+            if st.button("Voltar", type="primary"):
+                st.rerun()
+        return
+
+    mode_map = {"chat":"Chat", "audio":"Voz", "video":"Videochamada"}
+    query_mode = str(st.query_params.get("tipo", "chat")).lower()
+    default_mode = mode_map.get(query_mode, "Chat")
+    with st.form("kiosk-rh-request"):
+        kind = st.selectbox("Como prefere ser atendido?", ["Chat", "Voz", "Videochamada"], index=["Chat", "Voz", "Videochamada"].index(default_mode))
+        topic = st.selectbox("Assunto", ["Dúvida sobre benefício", "Holerite ou pagamento", "Atestado ou declaração", "Outro assunto"])
+        submitted = st.form_submit_button("Solicitar atendimento", type="primary", use_container_width=True)
+    if submitted:
+        now = datetime.now(timezone.utc)
+        try:
+            created = store.insert("rh_rooms", {
+                "nome":"Colaborador do Totem", "tipo":kind, "assunto":topic,
+                "descricao":"Solicitação iniciada pelo totem. Sem relato livre.",
+                "status":"pendente", "expires_at":(now + timedelta(minutes=45)).isoformat(),
+            })
+            if not created or not created[0].get("id"):
+                raise RuntimeError("O Supabase não retornou o identificador do chamado.")
+            st.session_state.kiosk_room_id = created[0]["id"]
+            st.rerun()
+        except Exception as exc:
+            st.error("Não foi possível enviar o chamado ao RH.")
+            st.caption(str(exc))
+    st.caption("Atendimento privado. Esta etapa envia apenas o tipo e o assunto do chamado; não grava conversas nem áudio/vídeo.")
+
+if str(st.query_params.get("modo", "")).lower() == "totem":
+    render_kiosk()
+    st.stop()
 
 def auth_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     response = requests.post(
@@ -302,7 +418,17 @@ DEMO = [
 rooms, load_error = [], None
 if store:
     try:
-        rooms = store.rows("rh_rooms", "select=id,nome,tipo,assunto,descricao,created_at,status&status=in.(pendente,em_atendimento)&order=created_at.asc")
+        fetched_rooms = store.rows("rh_rooms", "select=id,nome,tipo,assunto,descricao,created_at,status,expires_at&status=in.(pendente,em_atendimento)&order=created_at.asc")
+        for item in fetched_rooms:
+            if item.get("status") == "pendente":
+                try:
+                    expires_at = datetime.fromisoformat(str(item.get("expires_at", "")).replace("Z", "+00:00"))
+                    if expires_at <= datetime.now(timezone.utc):
+                        store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(item.get('id')))}", {"status":"encerrado"})
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            rooms.append(item)
     except Exception as exc:
         load_error = str(exc)
 else:
