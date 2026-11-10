@@ -1,6 +1,8 @@
 import os
 import io
 import ipaddress
+import json
+import secrets
 from html import escape
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -8,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image, ImageOps, UnidentifiedImageError
 from streamlit_autorefresh import st_autorefresh
 
@@ -127,6 +130,70 @@ class Store:
             raise RuntimeError(f"Storage HTTP {r.status_code} {f'({code}) ' if code else ''}{message}")
         return f"{self.url}/storage/v1/object/public/rh-profiles/{path}?v={int(datetime.now().timestamp())}"
 
+
+def room_topic(room_id: str, room_token: str) -> str:
+    return f"rh-room-{room_id}-{room_token}"
+
+def broadcast_room_event(room_id: str, room_token: str, event: str) -> None:
+    topic = requests.utils.quote(room_topic(room_id, room_token), safe="-")
+    event_name = requests.utils.quote(event, safe="-")
+    response = requests.post(
+        f"{SUPABASE_URL}/realtime/v1/api/broadcast/{topic}/events/{event_name}",
+        headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+        json={"closed": event == "room-ended"},
+        timeout=8,
+    )
+    response.raise_for_status()
+
+def render_live_chat(room_id: str, room_token: str, role: str) -> None:
+    if not room_token:
+        st.warning("A sala ainda não tem uma chave de conexão. Abra a sala novamente depois de atualizar o banco.")
+        return
+    config = {
+        "url": SUPABASE_URL,
+        "anonKey": SUPABASE_ANON_KEY,
+        "topic": room_topic(room_id, room_token),
+        "role": role,
+    }
+    config_json = json.dumps(config).replace("<", "\\u003c")
+    html = r'''<!doctype html><html><head><meta charset="utf-8"><style>
+      *{box-sizing:border-box}body{margin:0;background:#0b1a2b;color:#eef6ff;font:15px Arial,sans-serif}
+      .chat{height:390px;display:flex;flex-direction:column;border:1px solid #28445f;border-radius:14px;overflow:hidden;background:#0e2034}
+      .head{padding:10px 14px;background:#102943;border-bottom:1px solid #29445e;display:flex;justify-content:space-between;gap:8px;align-items:center}
+      .state{color:#65dfb4;font-size:12px}.messages{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+      .bubble{max-width:86%;padding:9px 12px;border-radius:12px;background:#18344e;overflow-wrap:anywhere;white-space:pre-wrap;align-self:flex-start}
+      .bubble.self{background:#126b83;align-self:flex-end}.meta{font-size:10px;color:#a9bfd2;margin-bottom:4px}
+      form{display:flex;gap:8px;padding:10px;border-top:1px solid #29445e;background:#0d1c2d}
+      input{flex:1;min-width:0;border:1px solid #35536f;border-radius:9px;background:#071523;color:#fff;padding:12px;font-size:15px}
+      button{border:0;border-radius:9px;background:#1688a7;color:white;padding:10px 16px;font-weight:700;font-size:14px}
+      button:disabled,input:disabled{opacity:.55} .hint{padding:0 12px 9px;color:#91a9bd;font-size:11px}
+    </style></head><body><section class="chat"><header class="head"><strong>Conversa privativa</strong><span class="state" id="state">Conectando...</span></header>
+      <main class="messages" id="messages" aria-live="polite"></main><div class="hint">Mensagens transmitidas ao vivo; não são gravadas no histórico do app.</div>
+      <form id="form"><input id="text" maxlength="2000" autocomplete="off" placeholder="Escreva uma mensagem..." aria-label="Mensagem"><button id="send" type="submit">Enviar</button></form></section>
+      <script type="module">
+      import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.91.0/+esm';
+      const cfg=__CONFIG__, status=document.getElementById('state'), list=document.getElementById('messages'), form=document.getElementById('form'), field=document.getElementById('text'), sendButton=document.getElementById('send');
+      let closed=false;
+      function showMessage(message, own){const box=document.createElement('div');box.className='bubble'+(own?' self':'');const meta=document.createElement('div');meta.className='meta';meta.textContent=(message.role==='rh'?'RH':'Colaborador')+' · '+new Date(message.sentAt||Date.now()).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});const body=document.createElement('div');body.textContent=String(message.text||'').slice(0,2000);box.append(meta,body);list.append(box);list.scrollTop=list.scrollHeight;}
+      const client=createClient(cfg.url,cfg.anonKey,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}});
+      const channel=client.channel(cfg.topic,{config:{private:false,broadcast:{self:false,ack:true}}});
+      channel.on('broadcast',{event:'chat-message'},evt=>{const data=evt?.payload||evt;if(data.role!==cfg.role&&data.text)showMessage(data,false);})
+        .on('broadcast',{event:'room-ended'},()=>{closed=true;status.textContent='Atendimento encerrado';status.style.color='#ffc46b';field.disabled=true;sendButton.disabled=true;});
+      channel.subscribe(s=>{if(s==='SUBSCRIBED'){status.textContent='Conectado';}else if(s==='CHANNEL_ERROR'||s==='TIMED_OUT'){status.textContent='Falha na conexão';status.style.color='#ff8e96';}else if(s==='CLOSED'&&!closed){status.textContent='Conexão encerrada';}});
+      form.addEventListener('submit',async event=>{event.preventDefault();const text=field.value.trim();if(!text||closed)return;field.value='';const sentAt=new Date().toISOString();showMessage({role:cfg.role,text,sentAt},true);const result=await channel.send({type:'broadcast',event:'chat-message',payload:{role:cfg.role,text,sentAt}});if(result!=='ok'&&result?.status!=='ok'){status.textContent='Mensagem não enviada · tente novamente';status.style.color='#ff8e96';}});
+      window.addEventListener('pagehide',()=>client.removeChannel(channel));
+      </script></body></html>'''.replace("__CONFIG__", config_json)
+    components.html(html, height=398, scrolling=False)
+
+def ensure_room_token(room: dict[str, Any]) -> str:
+    token = str(room.get("room_token") or "")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(room.get('id')))}", {"room_token": token})
+        room["room_token"] = token
+    return token
+
+
 store = Store(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
 # ---------- Individual account in Supabase Auth ----------
@@ -158,7 +225,8 @@ def kiosk_return_url() -> str:
         return ""
 
 def render_kiosk():
-    st_autorefresh(interval=3500, key="kiosk_room_refresh")
+    if st.session_state.get("kiosk_room_status") != "em_atendimento":
+        st_autorefresh(interval=3500, key="kiosk_room_refresh")
     st.markdown('<div class="eyebrow">IBERO CONECTA · ATENDIMENTO RH</div><div class="hero-title">Fale com o RH</div><p class="subtle">Seu chamado será encaminhado à equipe disponível. Não informe dados pessoais nesta tela.</p>', unsafe_allow_html=True)
     return_url = kiosk_return_url()
     if return_url:
@@ -174,10 +242,20 @@ def render_kiosk():
         st.caption(str(exc))
         st.stop()
 
+    if st.session_state.get("kiosk_done"):
+        st.markdown('<div class="glass" style="max-width:900px;margin:28px auto;text-align:center;padding:36px"><div class="eyebrow">ATENDIMENTO CONCLUÍDO</div><div class="hero-title" style="font-size:2rem">Obrigado por falar com o RH</div></div>', unsafe_allow_html=True)
+        if return_url:
+            st.link_button("Voltar ao IBERO CONECTA", return_url)
+        if st.button("Iniciar outro atendimento"):
+            st.session_state.pop("kiosk_done", None)
+            st.session_state.pop("kiosk_room_status", None)
+            st.rerun()
+        return
+
     room_id = st.session_state.get("kiosk_room_id")
     if room_id:
         try:
-            rows = store.rows("rh_rooms", f"select=id,tipo,assunto,status,atendente,created_at,expires_at&id=eq.{requests.utils.quote(str(room_id))}")
+            rows = store.rows("rh_rooms", f"select=id,tipo,assunto,status,atendente,created_at,expires_at,room_token&id=eq.{requests.utils.quote(str(room_id))}")
         except Exception as exc:
             st.error("Não consegui atualizar o chamado. Verifique a conexão e tente novamente.")
             st.caption(str(exc))
@@ -188,12 +266,14 @@ def render_kiosk():
             st.rerun()
         room = rows[0]
         status = room.get("status")
+        st.session_state.kiosk_room_status = status
         if status == "pendente":
             try:
                 expires_at = datetime.fromisoformat(str(room.get("expires_at", "")).replace("Z", "+00:00"))
                 if expires_at <= datetime.now(timezone.utc):
                     store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(room_id))}", {"status":"encerrado"})
                     st.session_state.pop("kiosk_room_id", None)
+                    st.session_state.pop("kiosk_room_status", None)
                     st.warning("O tempo de espera terminou. Se ainda precisar, envie outro chamado.")
                     return
             except (TypeError, ValueError):
@@ -202,18 +282,36 @@ def render_kiosk():
             if st.button("Cancelar chamado", use_container_width=True):
                 store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(room_id))}", {"status":"encerrado"})
                 st.session_state.pop("kiosk_room_id", None)
+                st.session_state.pop("kiosk_room_status", None)
                 st.rerun()
         elif status == "em_atendimento":
             attendant = escape(str(room.get("atendente") or "Equipe RH"))
-            st.markdown(f'<div class="glass" style="max-width:900px;margin:28px auto;text-align:center;padding:36px"><div class="eyebrow">CHAMADO ACEITO</div><div class="hero-title" style="font-size:2rem">O RH está disponível para atender</div><p class="subtle">{attendant} aceitou sua solicitação.</p><p class="subtle">A chamada foi encaminhada. A conexão de chat e vídeo será ativada na próxima etapa.</p></div>', unsafe_allow_html=True)
-            if st.button("Concluir", type="primary", use_container_width=True):
-                store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(room_id))}", {"status":"encerrado"})
+            kind = str(room.get("tipo") or "Chat")
+            st.markdown(f'<div class="glass" style="max-width:900px;margin:20px auto;text-align:center;padding:24px"><div class="eyebrow">ATENDIMENTO CONECTADO</div><div class="hero-title" style="font-size:1.8rem">{attendant} aceitou seu chamado</div><p class="subtle">Converse com o RH por mensagens nesta sala.</p></div>', unsafe_allow_html=True)
+            if kind in {"Voz", "Videochamada"}:
+                st.info(f"Você escolheu {kind.lower()}. Nesta versão, o chat escrito já está conectado; voz e vídeo ainda não estão habilitados.")
+            render_live_chat(str(room_id), str(room.get("room_token") or ""), "colaborador")
+            if st.button("Encerrar atendimento", type="primary", use_container_width=True):
+                try:
+                    store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(room_id))}", {"status":"encerrado"})
+                except Exception as exc:
+                    st.error(f"Não foi possível encerrar a sala: {exc}")
+                    st.stop()
+                if room.get("room_token"):
+                    try:
+                        broadcast_room_event(str(room_id), str(room["room_token"]), "room-ended")
+                    except Exception:
+                        st.warning("A sala foi encerrada. O aviso em tempo real não chegou ao RH.")
                 st.session_state.pop("kiosk_room_id", None)
+                st.session_state.pop("kiosk_room_status", None)
+                st.session_state.kiosk_done = True
                 st.rerun()
         else:
             st.session_state.pop("kiosk_room_id", None)
-            st.info("O chamado foi encerrado. Se ainda precisar, inicie um novo atendimento.")
-            if st.button("Voltar", type="primary"):
+            st.session_state.pop("kiosk_room_status", None)
+            st.session_state.kiosk_done = True
+            st.info("O chamado foi encerrado.")
+            if st.button("Concluir", type="primary"):
                 st.rerun()
         return
 
@@ -227,19 +325,22 @@ def render_kiosk():
     if submitted:
         now = datetime.now(timezone.utc)
         try:
+            room_token = secrets.token_urlsafe(32)
             created = store.insert("rh_rooms", {
                 "nome":"Colaborador do Totem", "tipo":kind, "assunto":topic,
                 "descricao":"Solicitação iniciada pelo totem. Sem relato livre.",
                 "status":"pendente", "expires_at":(now + timedelta(minutes=45)).isoformat(),
+                "room_token":room_token,
             })
             if not created or not created[0].get("id"):
                 raise RuntimeError("O Supabase não retornou o identificador do chamado.")
             st.session_state.kiosk_room_id = created[0]["id"]
+            st.session_state.kiosk_room_status = "pendente"
             st.rerun()
         except Exception as exc:
             st.error("Não foi possível enviar o chamado ao RH.")
             st.caption(str(exc))
-    st.caption("Atendimento privado. Esta etapa envia apenas o tipo e o assunto do chamado; não grava conversas nem áudio/vídeo.")
+    st.caption("As mensagens da sala são transmitidas ao vivo e não são gravadas no histórico do app. Áudio e vídeo ainda não estão habilitados.")
 
 if str(st.query_params.get("modo", "")).lower() == "totem":
     render_kiosk()
@@ -357,7 +458,8 @@ if profile.get("approval_status") != "approved":
             st.session_state.pop(key, None)
         st.rerun()
     st.stop()
-st_autorefresh(interval=7000, key="rh_queue_refresh")
+if not st.session_state.get("current_room"):
+    st_autorefresh(interval=7000, key="rh_queue_refresh")
 
 # ---------- Header / profile ----------
 name = st.session_state.get("rh_name", "Atendimento RH")
@@ -444,7 +546,7 @@ DEMO = [
 rooms, load_error = [], None
 if store:
     try:
-        fetched_rooms = store.rows("rh_rooms", "select=id,nome,tipo,assunto,descricao,created_at,status,expires_at&status=in.(pendente,em_atendimento)&order=created_at.asc")
+        fetched_rooms = store.rows("rh_rooms", "select=id,nome,tipo,assunto,descricao,created_at,status,expires_at,room_token&status=in.(pendente,em_atendimento)&order=created_at.asc")
         for item in fetched_rooms:
             if item.get("status") == "pendente":
                 try:
@@ -470,6 +572,38 @@ for col, label, value, note in [
     (k4,"TEMPO DE RESPOSTA","—","média desta sessão")]:
     with col: st.markdown(f'<div class="glass"><div class="metric-label">{label}</div><div class="metric-value">{value}</div><div class="metric-note">{note}</div></div>',unsafe_allow_html=True)
 
+# Keep the active conversation in the main reading area. Previously it was
+# rendered at the bottom of the profile column, so clicking "Abrir sala"
+# could look like it had done nothing unless the attendant scrolled farther.
+if st.session_state.get("current_room"):
+    room = st.session_state.current_room
+    room_id = str(room.get("id") or "")
+    room_token = str(room.get("room_token") or "")
+    st.write("")
+    st.markdown('<div class="section-title">Sala de atendimento</div><div class="subtle">Esta conversa é privada e não mantém histórico de mensagens.</div>', unsafe_allow_html=True)
+    if room_id and not room_token:
+        try:
+            room_token = ensure_room_token(room)
+        except Exception as exc:
+            st.error(f"Não foi possível preparar a conexão da sala: {exc}")
+    if room_id and room_token:
+        st.markdown(f'<div class="ticket"><div class="ticket-type">{escape(str(room.get("tipo") or "Atendimento"))}</div><div class="ticket-name">{escape(str(room.get("nome") or "Colaborador"))}</div><div class="ticket-text"><b>{escape(str(room.get("assunto") or "Contato privado"))}</b></div></div>', unsafe_allow_html=True)
+        if room.get("tipo") in {"Voz", "Videochamada"}:
+            st.info(f'O colaborador escolheu {str(room.get("tipo")).lower()}. A conversa por texto está conectada; voz e vídeo ainda não estão habilitados.')
+        render_live_chat(room_id, room_token, "rh")
+        if st.button("Encerrar atendimento", key=f"close-room-{room_id}", type="primary"):
+            try:
+                store.update("rh_rooms", f"id=eq.{requests.utils.quote(room_id)}", {"status":"encerrado"})
+            except Exception as exc:
+                st.error(f"Não foi possível encerrar a sala: {exc}")
+            else:
+                try:
+                    broadcast_room_event(room_id, room_token, "room-ended")
+                except Exception:
+                    st.warning("A sala foi encerrada. O aviso em tempo real não chegou ao totem; ele também pode sair pelo botão Voltar.")
+                st.session_state.current_room=None
+                st.rerun()
+
 st.write("")
 queue_col, profile_col = st.columns([1.55, 1], gap="large")
 with queue_col:
@@ -493,15 +627,25 @@ with queue_col:
             if room.get("status")=="pendente":
                 if st.button("Aceitar atendimento",key=f"accept-{rid}",disabled=not st.session_state.available,use_container_width=False):
                     if store and not is_demo:
-                        try: store.update("rh_rooms",f"id=eq.{rid}",{"status":"em_atendimento","atendente":name,"accepted_at":datetime.now().isoformat()})
-                        except Exception as exc: st.error(f"Falha ao aceitar: {exc}")
+                        try:
+                            room_token = ensure_room_token(room)
+                            store.update("rh_rooms",f"id=eq.{rid}",{"status":"em_atendimento","atendente":name,"accepted_at":datetime.now(timezone.utc).isoformat(),"room_token":room_token})
+                        except Exception as exc:
+                            st.error(f"Falha ao aceitar: {exc}")
+                            st.stop()
                     else:
                         st.session_state.demo_queue=False
+                    room.update({"status":"em_atendimento","atendente":name})
                     st.session_state.current_room=room
-                    st.success("Atendimento aceito. A sala está preparada para conectar o totem.")
+                    st.success("Atendimento aceito. A sala de conversa está aberta.")
                     st.rerun()
             elif st.button("Abrir sala",key=f"open-{rid}"):
-                st.session_state.current_room=room
+                try:
+                    ensure_room_token(room)
+                    st.session_state.current_room=room
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Não foi possível abrir a sala: {exc}")
 
 with profile_col:
     st.markdown('<div class="section-title">Seu perfil</div><div class="subtle">Como sua equipe aparece para o colaborador.</div>',unsafe_allow_html=True)
@@ -509,14 +653,6 @@ with profile_col:
     if profile_url: st.image(profile_url,width=104)
     else: st.markdown('<div class="orb" style="width:88px;height:88px;margin:0 auto;font-size:1.6rem">RH</div>',unsafe_allow_html=True)
     st.markdown(f'<div class="profile-name">{escape(name or "Atendimento RH")}</div><div class="profile-role">IBERO · Recursos Humanos</div><hr><div class="subtle">{ "Disponível para receber contatos" if st.session_state.available else "Pausada · o totem verá que a equipe está indisponível" }</div></div>',unsafe_allow_html=True)
-    if st.session_state.get("current_room"):
-        room=st.session_state.current_room
-        st.markdown("#### Sala selecionada")
-        st.info(f"{room.get('tipo','Atendimento')} · {room.get('assunto') or 'Contato privado'}")
-        st.caption("A conexão de chat e vídeo será ligada à sala compartilhada com o totem na próxima etapa.")
-        if st.button("Encerrar visualização",key="close-room"):
-            st.session_state.current_room=None; st.rerun()
-
 st.markdown("<hr>",unsafe_allow_html=True)
 foot1,foot2=st.columns([8,2])
 with foot1: st.caption("IBERO ATENDE · Atendimentos privados · Não grave ou compartilhe dados do colaborador fora do fluxo autorizado.")
