@@ -31,6 +31,12 @@ Para integrar o fluxo existente do IBERO CONECTA, aplique o patch mais recente d
 
 A sala aberta aparece logo abaixo dos indicadores no painel RH. No totem, a tela fica compacta durante o atendimento para manter a conversa acessível sem rolagem. As mensagens usam transmissão em tempo real e não são gravadas pelo app.
 
+## Ficha do atendimento e aceite
+
+Durante uma sala ativa, o RH preenche nome, matrícula, assunto, relato, orientação/devolutiva e se o pedido foi solucionado. Ao enviar, a ficha aparece no totem para o colaborador ler e confirmar o recebimento. O aceite e a data/hora ficam registrados na mesma linha da sala no Supabase; o histórico de chat continua sem gravação. Os dados da ficha permanecem enquanto a linha da sala existir e podem ser removidos junto com os chamados encerrados, conforme a rotina de retenção definida pela Ibero.
+
+Para habilitar a ficha, execute o `supabase_setup.sql` atualizado no SQL Editor do Supabase antes de testar. O script adiciona as colunas da ficha e a função segura de aceite, sem apagar os chamados existentes.
+
 Quando o colaborador escolhe **Videochamada**, RH e colaborador devem tocar em **Ativar câmera e microfone** e permitir o acesso no navegador. O vídeo usa WebRTC com STUN para tentar conexão direta entre os dois dispositivos. Redes com firewall restritivo podem exigir um servidor TURN configurado; nesses casos, a tela mostra o estado ou o erro da conexão. A opção **Voz** sem vídeo ainda não está habilitada. Não há gravação de áudio ou vídeo.
 
 ## Atualização da sala de chat
