@@ -42,7 +42,7 @@ create or replace function public.rh_accept_ficha(p_room_id uuid, p_room_token t
 returns boolean
 language plpgsql
 security definer
-set search_path = public
+set search_path = ''
 as $$
 declare
   changed_rows integer;
