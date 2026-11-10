@@ -134,18 +134,18 @@ class Store:
 def room_topic(room_id: str, room_token: str) -> str:
     return f"rh-room-{room_id}-{room_token}"
 
-def broadcast_room_event(room_id: str, room_token: str, event: str) -> None:
+def broadcast_room_event(room_id: str, room_token: str, event: str, payload: dict[str, Any] | None = None) -> None:
     topic = requests.utils.quote(room_topic(room_id, room_token), safe="-")
     event_name = requests.utils.quote(event, safe="-")
     response = requests.post(
         f"{SUPABASE_URL}/realtime/v1/api/broadcast/{topic}/events/{event_name}",
         headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
-        json={"closed": event == "room-ended"},
+        json=payload if payload is not None else {"closed": event == "room-ended"},
         timeout=8,
     )
     response.raise_for_status()
 
-def render_live_chat(room_id: str, room_token: str, role: str, video_enabled: bool = False) -> None:
+def render_live_chat(room_id: str, room_token: str, role: str, video_enabled: bool = False, ficha_status: str = "nao_criada", ficha_data: dict[str, Any] | None = None, ficha_accepted_at: str | None = None) -> None:
     if not room_token:
         st.warning("A sala ainda não tem uma chave de conexão. Abra a sala novamente depois de atualizar o banco.")
         return
@@ -155,6 +155,11 @@ def render_live_chat(room_id: str, room_token: str, role: str, video_enabled: bo
         "topic": room_topic(room_id, room_token),
         "role": role,
         "video": video_enabled,
+        "roomId": room_id,
+        "roomToken": room_token,
+        "fichaStatus": ficha_status,
+        "ficha": ficha_data or {},
+        "fichaAcceptedAt": ficha_accepted_at or "",
     }
     box_height = 590 if video_enabled and role == "colaborador" else 650 if video_enabled else 250 if role == "colaborador" else 390
     component_height = box_height + 8
@@ -175,20 +180,27 @@ def render_live_chat(room_id: str, room_token: str, role: str, video_enabled: bo
       .video video{display:block;width:100%;height:100%;background:#030912;object-fit:contain}.video-label{position:absolute;left:9px;top:9px;padding:5px 9px;border-radius:999px;background:rgba(4,13,22,.78);color:#e8f5ff;font-size:12px;font-weight:700}
       .remote-wait{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:18px;color:#a9bdd0;font-size:13px;background:linear-gradient(145deg,rgba(14,32,52,.45),rgba(3,9,18,.72))}
       .video-controls{display:flex;align-items:center;gap:10px;margin-top:9px;flex-wrap:wrap}.video-controls button{padding:9px 13px}.video-help{color:#b2c5d7;font-size:12px}
+      .ficha-panel{display:none;padding:12px 14px;border-bottom:1px solid #29445e;background:#10243a;max-height:210px;overflow:auto}
+      .ficha-title{font-weight:700;color:#6fe6e6;margin-bottom:8px}.ficha-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px}
+      .ficha-item{font-size:12px;color:#c5d5e3;overflow-wrap:anywhere}.ficha-item b{color:#91a9bd;display:block;font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px}
+      .ficha-accept{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12px;color:#e2edf6}.ficha-accept button{margin-left:auto;padding:8px 12px}.ficha-note{font-size:11px;color:#9bb0c2;margin-top:7px}
       @media(max-width:700px){.video-grid{grid-template-columns:1fr 1fr;gap:7px}.video-tile{height:clamp(145px,42vw,230px)}.video{padding:8px}}
     </style></head><body><section class="chat"><header class="head"><strong>Conversa privativa</strong><span class="state" id="state">Conectando...</span></header>
       <section class="video" id="video"><div class="video-grid"><div class="video-tile"><video id="local" autoplay playsinline muted></video><span class="video-label">Você</span></div><div class="video-tile"><video id="remote" autoplay playsinline></video><span class="video-label">__OTHER_LABEL__</span><div class="remote-wait" id="remote-wait">Aguardando a outra pessoa ativar a câmera…</div></div></div><div class="video-controls"><button id="start-video" type="button">Ativar câmera e microfone</button><button id="stop-video" type="button" style="display:none">Desligar câmera</button><span class="video-help" id="video-help">Toque no botão e permita o acesso à câmera e ao microfone.</span></div></section>
+      <section class="ficha-panel" id="ficha-panel" aria-live="polite"></section>
       <main class="messages" id="messages" aria-live="polite"><div id="empty" style="color:#91a9bd;text-align:center;margin:auto;font-size:13px">Conversa conectada. Envie uma mensagem para iniciar.</div></main><div class="hint">Mensagens transmitidas ao vivo; não são gravadas no histórico do app.</div>
       <form id="form"><input id="text" maxlength="2000" autocomplete="off" placeholder="Escreva uma mensagem..." aria-label="Mensagem"><button id="send" type="submit">Enviar</button></form></section>
       <script type="module">
       import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.91.0/+esm';
       const cfg=__CONFIG__, status=document.getElementById('state'), list=document.getElementById('messages'), form=document.getElementById('form'), field=document.getElementById('text'), sendButton=document.getElementById('send');
-      const videoPanel=document.getElementById('video'), localVideo=document.getElementById('local'), remoteVideo=document.getElementById('remote'), videoHelp=document.getElementById('video-help'), remoteWait=document.getElementById('remote-wait'), startVideoButton=document.getElementById('start-video'), stopVideoButton=document.getElementById('stop-video');
+      const videoPanel=document.getElementById('video'), localVideo=document.getElementById('local'), remoteVideo=document.getElementById('remote'), videoHelp=document.getElementById('video-help'), remoteWait=document.getElementById('remote-wait'), startVideoButton=document.getElementById('start-video'), stopVideoButton=document.getElementById('stop-video'), fichaPanel=document.getElementById('ficha-panel');
       let closed=false, peer=null, localStream=null, remoteDescriptionSet=false, pendingCandidates=[], pendingOffer=null, offerTimer=null, videoConnected=false;
       if(cfg.video)videoPanel.style.display='block';else videoPanel.remove();
       function showMessage(message, own){document.getElementById('empty')?.remove();const box=document.createElement('div');box.className='bubble'+(own?' self':'');const meta=document.createElement('div');meta.className='meta';meta.textContent=(message.role==='rh'?'RH':'Colaborador')+' · '+new Date(message.sentAt||Date.now()).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});const body=document.createElement('div');body.textContent=String(message.text||'').slice(0,2000);box.append(meta,body);list.append(box);list.scrollTop=list.scrollHeight;}
       const client=createClient(cfg.url,cfg.anonKey,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}});
       const channel=client.channel(cfg.topic,{config:{private:false,broadcast:{self:false,ack:true}}});
+      function renderFicha(ficha,state,acceptedAt=''){if(!['aguardando_aceite','aceita'].includes(state)){fichaPanel.style.display='none';return;}fichaPanel.replaceChildren();fichaPanel.style.display='block';const title=document.createElement('div');title.className='ficha-title';title.textContent=state==='aceita'?'Ficha aceita pelo colaborador':'Ficha do atendimento · confira antes de aceitar';fichaPanel.append(title);const grid=document.createElement('div');grid.className='ficha-grid';const fields=[['Nome','nome'],['Matrícula','matricula'],['Tipo','tipo'],['Assunto','assunto'],['Relato','relato'],['Orientação do RH','orientacao'],['Foi solucionado?','solucionado']];for(const [label,key] of fields){const value=String(ficha?.[key]||'').trim();if(!value)continue;const item=document.createElement('div');item.className='ficha-item';const strong=document.createElement('b');strong.textContent=label;const content=document.createElement('span');content.textContent=value;item.append(strong,content);grid.append(item);}fichaPanel.append(grid);if(state==='aceita'){const done=document.createElement('div');done.className='ficha-note';done.textContent='Aceite registrado'+(acceptedAt?' em '+new Date(acceptedAt).toLocaleString('pt-BR'):'')+'.';fichaPanel.append(done);return;}const row=document.createElement('div');row.className='ficha-accept';const check=document.createElement('input');check.type='checkbox';check.id='ficha-check';const label=document.createElement('label');label.htmlFor='ficha-check';label.textContent='Li e confirmo o recebimento desta ficha.';const button=document.createElement('button');button.type='button';button.textContent='Confirmar aceite';button.disabled=true;check.addEventListener('change',()=>button.disabled=!check.checked);button.addEventListener('click',async()=>{if(!check.checked)return;button.disabled=true;button.textContent='Registrando...';try{const result=await client.rpc('rh_accept_ficha',{p_room_id:cfg.roomId,p_room_token:cfg.roomToken});if(result.error||result.data!==true)throw new Error(result.error?.message||'A ficha não está mais aguardando aceite.');const acceptedAt=new Date().toISOString();cfg.fichaStatus='aceita';cfg.fichaAcceptedAt=acceptedAt;renderFicha(ficha,'aceita',acceptedAt);await channel.send({type:'broadcast',event:'ficha-accepted',payload:{acceptedAt}});}catch(err){button.disabled=false;button.textContent='Confirmar aceite';const msg=document.createElement('div');msg.className='ficha-note';msg.style.color='#ff9a9f';msg.textContent='Não foi possível registrar: '+(err?.message||err);fichaPanel.append(msg);}});row.append(check,label,button);fichaPanel.append(row);const note=document.createElement('div');note.className='ficha-note';note.textContent='Se precisar corrigir algum dado, avise o atendente antes de confirmar.';fichaPanel.append(note);}
+      renderFicha(cfg.ficha,cfg.fichaStatus,cfg.fichaAcceptedAt);
       async function sendSignal(kind,data){await channel.send({type:'broadcast',event:'rtc-signal',payload:{from:cfg.role,kind,data}});}
       async function setupPeer(){if(peer)return peer;peer=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});peer.onicecandidate=e=>{if(e.candidate)sendSignal('candidate',e.candidate.toJSON()).catch(()=>{});};peer.ontrack=e=>{remoteVideo.srcObject=e.streams[0];remoteVideo.play().catch(()=>{});remoteWait.style.display='none';status.textContent='Vídeo conectado';videoHelp.textContent='Chamada de vídeo conectada.';};peer.onconnectionstatechange=()=>{if(peer.connectionState==='connected'){videoConnected=true;status.textContent='Vídeo conectado';}else if(['failed','disconnected'].includes(peer.connectionState)){status.textContent='Vídeo sem conexão';videoHelp.textContent='A rede não conseguiu estabelecer o vídeo. Verifique a rede e tente novamente.';remoteWait.style.display='grid';remoteWait.textContent='Não foi possível conectar o outro vídeo. Verifique a rede.';}};if(localStream)localStream.getTracks().forEach(track=>peer.addTrack(track,localStream));return peer;}
       async function answerOffer(desc){if(!localStream||!desc)return;const pc=await setupPeer();if(pc.currentRemoteDescription?.sdp===desc.sdp)return;await pc.setRemoteDescription(new RTCSessionDescription(desc));remoteDescriptionSet=true;for(const candidate of pendingCandidates.splice(0))await pc.addIceCandidate(new RTCIceCandidate(candidate));const answer=await pc.createAnswer();await pc.setLocalDescription(answer);await sendSignal('answer',pc.localDescription);status.textContent='Chamando...';}
@@ -197,6 +209,8 @@ def render_live_chat(room_id: str, room_token: str, role: str, video_enabled: bo
       function stopMedia(notify=true){if(offerTimer){clearInterval(offerTimer);offerTimer=null;}if(notify)sendSignal('stop',{}).catch(()=>{});localStream?.getTracks().forEach(t=>t.stop());localStream=null;if(peer){peer.close();peer=null;}localVideo.srcObject=null;remoteVideo.srcObject=null;remoteWait.style.display='grid';remoteWait.textContent='Aguardando a outra pessoa ativar a câmera…';videoConnected=false;remoteDescriptionSet=false;pendingCandidates=[];pendingOffer=null;startVideoButton.style.display='inline-block';stopVideoButton.style.display='none';status.textContent=closed?'Atendimento encerrado':'Conectado';videoHelp.textContent='Câmera desligada.';}
       channel.on('broadcast',{event:'chat-message'},evt=>{const data=evt?.payload||evt;if(data.role!==cfg.role&&data.text)showMessage(data,false);})
         .on('broadcast',{event:'rtc-signal'},onSignal)
+        .on('broadcast',{event:'ficha-shared'},evt=>{const data=evt?.payload||evt;cfg.ficha=data.ficha||{};cfg.fichaStatus='aguardando_aceite';renderFicha(cfg.ficha,'aguardando_aceite');})
+        .on('broadcast',{event:'ficha-accepted'},evt=>{const data=evt?.payload||evt;cfg.fichaStatus='aceita';cfg.fichaAcceptedAt=data.acceptedAt||'';renderFicha(cfg.ficha,'aceita',cfg.fichaAcceptedAt);})
         .on('broadcast',{event:'room-ended'},()=>{closed=true;stopMedia(false);status.textContent='Atendimento encerrado';status.style.color='#ffc46b';field.disabled=true;sendButton.disabled=true;startVideoButton.disabled=true;});
       channel.subscribe(s=>{if(s==='SUBSCRIBED'){status.textContent='Conectado';}else if(s==='CHANNEL_ERROR'||s==='TIMED_OUT'){status.textContent='Falha na conexão';status.style.color='#ff8e96';}else if(s==='CLOSED'&&!closed){status.textContent='Conexão encerrada';}});
       form.addEventListener('submit',async event=>{event.preventDefault();const text=field.value.trim();if(!text||closed)return;field.value='';const sentAt=new Date().toISOString();showMessage({role:cfg.role,text,sentAt},true);const result=await channel.send({type:'broadcast',event:'chat-message',payload:{role:cfg.role,text,sentAt}});if(result!=='ok'&&result?.status!=='ok'){status.textContent='Mensagem não enviada · tente novamente';status.style.color='#ff8e96';}});
@@ -277,7 +291,7 @@ def render_kiosk():
     room_id = st.session_state.get("kiosk_room_id")
     if room_id:
         try:
-            rows = store.rows("rh_rooms", f"select=id,tipo,assunto,status,atendente,created_at,expires_at,room_token&id=eq.{requests.utils.quote(str(room_id))}")
+            rows = store.rows("rh_rooms", f"select=id,tipo,assunto,status,atendente,created_at,expires_at,room_token,ficha_data,ficha_status,ficha_accepted_at&id=eq.{requests.utils.quote(str(room_id))}")
         except Exception as exc:
             st.error("Não consegui atualizar o chamado. Verifique a conexão e tente novamente.")
             st.caption(str(exc))
@@ -315,7 +329,7 @@ def render_kiosk():
             st.markdown(f'<div class="glass" style="max-width:900px;margin:10px auto;text-align:center;padding:14px"><div class="eyebrow">ATENDIMENTO CONECTADO</div><div class="hero-title" style="font-size:1.45rem">{attendant} aceitou seu chamado</div><p class="subtle">Converse com o RH nesta sala.</p></div>', unsafe_allow_html=True)
             if kind == "Voz":
                 st.info("O chat escrito está disponível. A chamada de voz ainda não foi habilitada.")
-            render_live_chat(str(room_id), str(room.get("room_token") or ""), "colaborador", video_enabled=kind == "Videochamada")
+            render_live_chat(str(room_id), str(room.get("room_token") or ""), "colaborador", video_enabled=kind == "Videochamada", ficha_status=str(room.get("ficha_status") or "nao_criada"), ficha_data=room.get("ficha_data") or {}, ficha_accepted_at=room.get("ficha_accepted_at"))
             if st.button("Encerrar atendimento", type="primary", use_container_width=True):
                 try:
                     store.update("rh_rooms", f"id=eq.{requests.utils.quote(str(room_id))}", {"status":"encerrado"})
@@ -572,7 +586,7 @@ DEMO = [
 rooms, load_error = [], None
 if store:
     try:
-        fetched_rooms = store.rows("rh_rooms", "select=id,nome,tipo,assunto,descricao,created_at,status,expires_at,room_token&status=in.(pendente,em_atendimento)&order=created_at.asc")
+        fetched_rooms = store.rows("rh_rooms", "select=id,nome,tipo,assunto,descricao,created_at,status,expires_at,room_token,ficha_data,ficha_status,ficha_accepted_at&status=in.(pendente,em_atendimento)&order=created_at.asc")
         for item in fetched_rooms:
             if item.get("status") == "pendente":
                 try:
@@ -616,7 +630,53 @@ if st.session_state.get("current_room"):
         st.markdown(f'<div class="ticket"><div class="ticket-type">{escape(str(room.get("tipo") or "Atendimento"))}</div><div class="ticket-name">{escape(str(room.get("nome") or "Colaborador"))}</div><div class="ticket-text"><b>{escape(str(room.get("assunto") or "Contato privado"))}</b></div></div>', unsafe_allow_html=True)
         if room.get("tipo") == "Voz":
             st.info("O chat escrito está disponível. A chamada de voz ainda não foi habilitada.")
-        render_live_chat(room_id, room_token, "rh", video_enabled=room.get("tipo") == "Videochamada")
+        ficha_status = str(room.get("ficha_status") or "nao_criada")
+        ficha_data = room.get("ficha_data") if isinstance(room.get("ficha_data"), dict) else {}
+        render_live_chat(room_id, room_token, "rh", video_enabled=room.get("tipo") == "Videochamada", ficha_status=ficha_status, ficha_data=ficha_data, ficha_accepted_at=room.get("ficha_accepted_at"))
+        st.markdown("#### Ficha do atendimento")
+        if ficha_status == "aceita":
+            accepted_at = str(room.get("ficha_accepted_at") or "")[:19].replace("T", " ")
+            st.success(f"O colaborador confirmou o recebimento da ficha{f' em {accepted_at}' if accepted_at else ''}.")
+        elif ficha_status == "aguardando_aceite":
+            st.info("Ficha enviada ao totem. Aguardando o colaborador confirmar o recebimento.")
+            if st.button("Atualizar confirmação da ficha", key=f"refresh-ficha-{room_id}"):
+                try:
+                    latest = store.rows("rh_rooms", f"select=ficha_status,ficha_data,ficha_accepted_at&id=eq.{requests.utils.quote(room_id)}")
+                    if latest:
+                        room.update(latest[0])
+                        st.session_state.current_room = room
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Não foi possível atualizar o aceite: {exc}")
+        else:
+            with st.expander("Preencher ficha para o colaborador", expanded=True):
+                with st.form(f"ficha-form-{room_id}"):
+                    ficha_nome = st.text_input("Nome do colaborador", value=str(ficha_data.get("nome") or ""), max_chars=120)
+                    ficha_matricula = st.text_input("Matrícula", value=str(ficha_data.get("matricula") or ""), max_chars=40)
+                    ficha_assunto = st.text_input("Assunto", value=str(ficha_data.get("assunto") or room.get("assunto") or ""), max_chars=160)
+                    ficha_relato = st.text_area("Relato do colaborador", value=str(ficha_data.get("relato") or room.get("descricao") or ""), max_chars=2000, height=90)
+                    ficha_orientacao = st.text_area("Orientação / devolutiva do RH", value=str(ficha_data.get("orientacao") or ""), max_chars=2000, height=100)
+                    ficha_solucionado = st.selectbox("Foi solucionado?", ["Sim", "Parcialmente", "Não"], index=["Sim", "Parcialmente", "Não"].index(str(ficha_data.get("solucionado") or "Sim")))
+                    submit_ficha = st.form_submit_button("Enviar ficha para aceite", type="primary", use_container_width=True)
+                if submit_ficha:
+                    if not ficha_nome.strip() or not ficha_orientacao.strip():
+                        st.error("Preencha o nome do colaborador e a orientação do RH.")
+                    else:
+                        new_ficha = {
+                            "nome":ficha_nome.strip(), "matricula":ficha_matricula.strip(),
+                            "tipo":str(room.get("tipo") or "Atendimento"), "assunto":ficha_assunto.strip(),
+                            "relato":ficha_relato.strip(), "orientacao":ficha_orientacao.strip(),
+                            "solucionado":ficha_solucionado,
+                        }
+                        try:
+                            store.update("rh_rooms", f"id=eq.{requests.utils.quote(room_id)}", {"ficha_data":new_ficha,"ficha_status":"aguardando_aceite","ficha_accepted_at":None})
+                            room.update({"ficha_data":new_ficha,"ficha_status":"aguardando_aceite","ficha_accepted_at":None})
+                            st.session_state.current_room = room
+                            broadcast_room_event(room_id, room_token, "ficha-shared", {"ficha":new_ficha,"status":"aguardando_aceite"})
+                            st.success("Ficha enviada ao totem para o colaborador confirmar.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Não foi possível enviar a ficha: {exc}")
         if st.button("Encerrar atendimento", key=f"close-room-{room_id}", type="primary"):
             try:
                 store.update("rh_rooms", f"id=eq.{requests.utils.quote(room_id)}", {"status":"encerrado"})
