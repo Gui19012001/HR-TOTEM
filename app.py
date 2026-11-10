@@ -1,8 +1,10 @@
 import os
 import io
+import ipaddress
 from html import escape
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 import streamlit as st
@@ -134,9 +136,33 @@ if not SUPABASE_URL or not SUPABASE_KEY or not SUPABASE_ANON_KEY:
 store = Store(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------- Kiosk entry: public screen, private server-side Supabase access ----------
+def kiosk_return_url() -> str:
+    candidate = str(st.query_params.get("voltar", "")).strip()
+    try:
+        parsed = urlsplit(candidate)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+            return ""
+        try:
+            address = ipaddress.ip_address(host)
+            trusted_host = address.is_private or address.is_loopback or address.is_link_local
+        except ValueError:
+            trusted_host = (
+                host == "localhost" or "." not in host or host.endswith((".local", ".internal"))
+                or host == "iberoequipamentos.com.br" or host.endswith(".iberoequipamentos.com.br")
+            )
+        if not trusted_host:
+            return ""
+        return urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
+    except ValueError:
+        return ""
+
 def render_kiosk():
     st_autorefresh(interval=3500, key="kiosk_room_refresh")
     st.markdown('<div class="eyebrow">IBERO CONECTA · ATENDIMENTO RH</div><div class="hero-title">Fale com o RH</div><p class="subtle">Seu chamado será encaminhado à equipe disponível. Não informe dados pessoais nesta tela.</p>', unsafe_allow_html=True)
+    return_url = kiosk_return_url()
+    if return_url:
+        st.link_button("← Voltar ao IBERO CONECTA", return_url)
     try:
         online = store.rows("rh_staff_profiles", "select=email&approval_status=eq.approved&is_available=eq.true")
         if online:
