@@ -55,9 +55,20 @@ hr{border-color:var(--line)}
 div[data-testid="stImage"] img{border-radius:50%;border:2px solid rgba(92,225,230,.65);object-fit:cover}
 div[data-testid="stFileUploader"]{font-size:.8rem}
 @media(max-width:900px){.block-container{padding:1rem}.profile-wrap{justify-content:flex-start}.hero-title{font-size:2rem}}
-body:has(.kiosk-active-marker) .block-container{max-width:none;padding:.35rem 1rem .5rem}
-body:has(.kiosk-active-marker) header[data-testid="stHeader"],body:has(.kiosk-active-marker) [data-testid="stToolbar"],body:has(.kiosk-active-marker) #MainMenu{display:none!important}
-body:has(.kiosk-active-marker) .kiosk-active-marker{height:0;overflow:hidden}
+body:has(.kiosk-active-marker) .block-container,body:has(.kiosk-mode-marker) .block-container{max-width:none;padding:.35rem 1rem .6rem}
+body:has(.kiosk-active-marker) header[data-testid="stHeader"],body:has(.kiosk-active-marker) [data-testid="stToolbar"],body:has(.kiosk-active-marker) #MainMenu,body:has(.kiosk-mode-marker) header[data-testid="stHeader"],body:has(.kiosk-mode-marker) [data-testid="stToolbar"],body:has(.kiosk-mode-marker) #MainMenu{display:none!important}
+body:has(.kiosk-active-marker) .kiosk-active-marker,body:has(.kiosk-mode-marker) .kiosk-mode-marker{height:0;overflow:hidden}
+body:has(.kiosk-mode-marker) .kiosk-hero{margin:4px 0 10px;padding:clamp(14px,2vw,24px);border:1px solid var(--line);border-radius:17px;background:linear-gradient(115deg,#102c47,#0b1b2d);box-shadow:0 12px 30px #0003}
+.kiosk-hero .eyebrow{margin-bottom:5px}.kiosk-hero h1{font:600 clamp(1.75rem,3vw,2.8rem) 'Space Grotesk';letter-spacing:-.04em;line-height:1.05;margin:.15rem 0 .35rem;color:var(--white)}
+.kiosk-hero p{margin:0;color:#b5cadd;font-size:clamp(.86rem,1vw,1rem)}
+.kiosk-request-card{display:grid;grid-template-columns:1fr 1.4fr;gap:10px;margin:12px 0;padding:clamp(13px,1.6vw,20px);border:1px solid var(--line);border-radius:15px;background:linear-gradient(145deg,#10243a,#0a192a)}
+.kiosk-request-item{min-width:0;padding:10px 12px;border:1px solid #284761;border-radius:10px;background:#0b1c2e}
+.kiosk-request-item span{display:block;margin-bottom:4px;color:#8eabc1;font-size:.68rem;font-weight:800;letter-spacing:.1em;text-transform:uppercase}
+.kiosk-request-item strong{display:block;color:#f3f8fc;font-size:clamp(.95rem,1.15vw,1.15rem);line-height:1.3;overflow-wrap:anywhere}
+.kiosk-action-caption{margin:8px 0 2px;color:#9fb7cb;font-size:.85rem}
+body:has(.kiosk-mode-marker) div[data-baseweb="select"]>div{background:#09192a!important;border:1px solid #34546f!important;color:#f3f8fc!important}
+body:has(.kiosk-mode-marker) div[data-baseweb="select"] *{color:#f3f8fc!important}
+body:has(.kiosk-mode-marker) [data-testid="stForm"]{padding:clamp(13px,1.6vw,20px);border:1px solid var(--line);border-radius:15px;background:#0d2034}
 body:has(.kiosk-active-marker) .kiosk-live-banner{display:flex;align-items:center;gap:12px;margin:6px 0 8px;padding:9px 13px;border:1px solid var(--line);border-radius:13px;background:linear-gradient(120deg,#102a42,#0b1a2b)}
 .kiosk-agent-avatar{width:42px;height:42px;flex:0 0 42px;border-radius:50%;object-fit:cover;border:2px solid var(--cyan);background:#163c59}
 .kiosk-agent-avatar-fallback{display:grid;place-items:center;color:#061423;font-weight:900;background:linear-gradient(135deg,#44d7df,#527cff)}
@@ -275,9 +286,10 @@ def render_kiosk():
     if st.session_state.get("kiosk_room_status") != "em_atendimento":
         st_autorefresh(interval=3500, key="kiosk_room_refresh")
     return_url = kiosk_return_url()
+    st.markdown('<div class="kiosk-mode-marker" aria-hidden="true"></div>', unsafe_allow_html=True)
 
     def render_lobby_header():
-        st.markdown('<div class="eyebrow">IBERO CONECTA · ATENDIMENTO RH</div><div class="hero-title">Fale com o RH</div><p class="subtle">Seu chamado será encaminhado à equipe disponível. Não informe dados pessoais nesta tela.</p>', unsafe_allow_html=True)
+        st.markdown('<section class="kiosk-hero"><div class="eyebrow">IBERO CONECTA · ATENDIMENTO RH</div><h1>Fale com o RH</h1><p>Seu chamado será encaminhado à equipe disponível. O assunto que você escolheu no totem já está preenchido.</p></section>', unsafe_allow_html=True)
         if return_url:
             st.link_button("← Voltar ao IBERO CONECTA", return_url)
         try:
@@ -380,12 +392,28 @@ def render_kiosk():
 
     render_lobby_header()
     mode_map = {"chat":"Chat", "audio":"Voz", "video":"Videochamada"}
-    query_mode = str(st.query_params.get("tipo", "chat")).lower()
-    default_mode = mode_map.get(query_mode, "Chat")
-    with st.form("kiosk-rh-request"):
-        kind = st.selectbox("Como prefere ser atendido?", ["Chat", "Voz", "Videochamada"], index=["Chat", "Voz", "Videochamada"].index(default_mode))
-        topic = st.selectbox("Assunto", ["Dúvida sobre benefício", "Holerite ou pagamento", "Atestado ou declaração", "Outro assunto"])
-        submitted = st.form_submit_button("Solicitar atendimento", type="primary", use_container_width=True)
+    topic_options = ["Dúvida sobre benefício", "Holerite ou pagamento", "Atestado ou declaração", "Outro assunto"]
+    query_mode = str(st.query_params.get("tipo", "")).strip().lower()
+    prefilled_subject = str(st.query_params.get("assunto", "")).strip()
+    if len(prefilled_subject) > 160 or any(ord(ch) < 32 for ch in prefilled_subject):
+        prefilled_subject = ""
+    has_prefill = query_mode in mode_map and bool(prefilled_subject)
+    if has_prefill:
+        kind = mode_map[query_mode]
+        topic = prefilled_subject
+        st.markdown(
+            '<div class="kiosk-request-card">'
+            f'<div class="kiosk-request-item"><span>Tipo de atendimento</span><strong>{escape(kind)}</strong></div>'
+            f'<div class="kiosk-request-item"><span>Assunto da pré-ficha</span><strong>{escape(topic)}</strong></div>'
+            '</div><p class="kiosk-action-caption">Confira os dados e encaminhe seu chamado à equipe de RH.</p>',
+            unsafe_allow_html=True,
+        )
+        submitted = st.button("Encaminhar chamado ao RH", type="primary", use_container_width=True)
+    else:
+        with st.form("kiosk-rh-request"):
+            kind = st.selectbox("Como prefere ser atendido?", ["Chat", "Voz", "Videochamada"], index=0)
+            topic = st.selectbox("Assunto", topic_options)
+            submitted = st.form_submit_button("Solicitar atendimento", type="primary", use_container_width=True)
     if submitted:
         now = datetime.now(timezone.utc)
         try:
@@ -404,7 +432,7 @@ def render_kiosk():
         except Exception as exc:
             st.error("Não foi possível enviar o chamado ao RH.")
             st.caption(str(exc))
-    st.caption("As mensagens não são gravadas. Em videochamadas, RH e colaborador ativam a câmera e autorizam câmera e microfone no navegador. A opção de chamada apenas por voz ainda não está disponível.")
+    st.caption("Atendimento privativo · as mensagens não ficam no histórico do aplicativo.")
 
 if str(st.query_params.get("modo", "")).lower() == "totem":
     render_kiosk()
